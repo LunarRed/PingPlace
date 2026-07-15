@@ -29,6 +29,7 @@ private enum AppConstants {
   static let orderedChildrenAttribute = "AXOrderedChildren"
   static let widgetEditorButtonIdentifier = "widget-editor-button"
   static let widgetIdentifierPrefix = "widget-local:"
+  static let maxAccessibilityNodesPerWindow = 10_000
   static let dockPadding: CGFloat = 30
   static let bannerRightPadding: CGFloat = 16
   static let bannerSubroles: Set<String> = [
@@ -106,17 +107,17 @@ extension AXUIElement {
   fileprivate func children() -> [AXUIElement] {
     let direct = attribute(kAXChildrenAttribute, as: [AXUIElement].self) ?? []
     let ordered = attribute(AppConstants.orderedChildrenAttribute, as: [AXUIElement].self) ?? []
-    var seen = Set<ObjectIdentifier>()
-    return (direct + ordered).filter { seen.insert(ObjectIdentifier($0)).inserted }
+    var seen = Set<AXUIElement>()
+    return (direct + ordered).filter { seen.insert($0).inserted }
   }
+}
 
-  fileprivate func firstDescendant(where predicate: (AXUIElement) -> Bool) -> AXUIElement? {
-    if predicate(self) { return self }
-    for child in children() {
-      if let match = child.firstDescendant(where: predicate) { return match }
-    }
-    return nil
-  }
+private enum NotificationCenterWindowKind {
+  case panel
+  case desktopWidget
+  case banner(AXUIElement)
+  case other
+  case indeterminate
 }
 
 extension AXError {
@@ -283,27 +284,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     moveAll()
   }
 
-  private func banner(in root: AXUIElement) -> AXUIElement? {
-    root.firstDescendant { element in
-      guard let subrole = element.attribute(kAXSubroleAttribute, as: String.self) else {
-        return false
+  private func classify(_ root: AXUIElement) -> NotificationCenterWindowKind {
+    var pending = [root]
+    var visited = Set<AXUIElement>()
+    var containsDesktopWidget = false
+    var banner: AXUIElement?
+
+    while let element = pending.popLast() {
+      guard visited.insert(element).inserted else { continue }
+      guard visited.count <= AppConstants.maxAccessibilityNodesPerWindow else {
+        return .indeterminate
       }
-      return AppConstants.bannerSubroles.contains(subrole)
+
+      if let identifier = element.attribute(kAXIdentifierAttribute, as: String.self) {
+        if identifier == AppConstants.widgetEditorButtonIdentifier {
+          return .panel
+        }
+        if identifier.hasPrefix(AppConstants.widgetIdentifierPrefix) {
+          containsDesktopWidget = true
+        }
+      }
+
+      if banner == nil,
+        let subrole = element.attribute(kAXSubroleAttribute, as: String.self),
+        AppConstants.bannerSubroles.contains(subrole)
+      {
+        banner = element
+      }
+
+      pending.append(contentsOf: element.children().reversed())
     }
-  }
 
-  private func ncPanelIsOpen(in root: AXUIElement) -> Bool {
-    root.firstDescendant { element in
-      element.attribute(kAXIdentifierAttribute, as: String.self)
-        == AppConstants.widgetEditorButtonIdentifier
-    } != nil
-  }
-
-  private func isDesktopWidget(_ root: AXUIElement) -> Bool {
-    root.firstDescendant { element in
-      element.attribute(kAXIdentifierAttribute, as: String.self)?
-        .hasPrefix(AppConstants.widgetIdentifierPrefix) == true
-    } != nil
+    if containsDesktopWidget { return .desktopWidget }
+    if let banner { return .banner(banner) }
+    return .other
   }
 
   private func summary(for element: AXUIElement) -> String {
@@ -314,19 +328,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   }
 
   private func move(_ window: AXUIElement) {
-    if isDesktopWidget(window) {
-      debug("Skipping desktop widget window")
-      return
-    }
-
-    if ncPanelIsOpen(in: window) {
+    let banner: AXUIElement
+    switch classify(window) {
+    case .panel:
       restoreWindowIfNeeded(window, reason: "Notification Center panel opened")
       debug("Skipping Notification Center panel state")
+      return
+    case .desktopWidget:
+      debug("Skipping desktop widget window")
+      return
+    case .banner(let element):
+      banner = element
+    case .other:
+      restoreWindowIfNeeded(window, reason: "No banner visible")
+      debug("Skipping window without banner")
+      return
+    case .indeterminate:
+      error(
+        "Skipping window after visiting more than \(AppConstants.maxAccessibilityNodesPerWindow) accessibility nodes"
+      )
       return
     }
 
     guard
-      let banner = banner(in: window),
       let bannerFrame = banner.frame(),
       let windowFrame = window.frame()
     else {
