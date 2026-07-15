@@ -120,6 +120,12 @@ private enum NotificationCenterWindowKind {
   case indeterminate
 }
 
+private struct WindowPlacementState {
+  let originalOrigin: CGPoint
+  let baselineWindowFrame: CGRect
+  let baselineBannerFrame: CGRect
+}
+
 extension AXError {
   fileprivate var name: String {
     switch self {
@@ -160,11 +166,8 @@ private func axObserverCallback(
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   private var axObserver: AXObserver?
   private var statusItem: NSStatusItem?
-  private var observedWindowKeys = Set<String>()
-  private var originalWindowOrigin: CGPoint?
-  private var windowIsShifted = false
-  private var baselineWindowFrame: CGRect?
-  private var baselineBannerFrame: CGRect?
+  private var observedWindows = Set<AXUIElement>()
+  private var placementByWindow = [AXUIElement: WindowPlacementState]()
 
   private let logger = Logger.app
   private let logFileURL = FileManager.default.homeDirectoryForCurrentUser
@@ -258,9 +261,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   }
 
   private func refreshWindowObservers() {
-    for window in notificationCenterWindows {
-      let key = observerKey(for: window)
-      guard observedWindowKeys.insert(key).inserted else { continue }
+    let currentWindows = Set(notificationCenterWindows)
+    observedWindows.formIntersection(currentWindows)
+    placementByWindow = placementByWindow.filter { currentWindows.contains($0.key) }
+
+    for window in currentWindows {
+      guard observedWindows.insert(window).inserted else { continue }
       register(
         AppConstants.childrenChangedNotification, for: window, label: "Notification Center window")
       register(kAXCreatedNotification as String, for: window, label: "Notification Center window")
@@ -268,14 +274,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         kAXUIElementDestroyedNotification as String, for: window,
         label: "Notification Center window")
     }
-  }
-
-  private func observerKey(for window: AXUIElement) -> String {
-    let role = window.attribute(kAXRoleAttribute, as: String.self) ?? "?"
-    let subrole = window.attribute(kAXSubroleAttribute, as: String.self) ?? "?"
-    let position = window.point(for: kAXPositionAttribute) ?? .zero
-    let size = window.size(for: kAXSizeAttribute) ?? .zero
-    return "\(role)|\(subrole)|\(position.x)|\(position.y)|\(size.width)|\(size.height)"
   }
 
   fileprivate func handleAXNotification(_ notification: String, element: AXUIElement) {
@@ -364,10 +362,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       return
     }
 
-    if baselineWindowFrame == nil || baselineBannerFrame == nil {
-      originalWindowOrigin = windowFrame.origin
-      baselineWindowFrame = windowFrame
-      baselineBannerFrame = bannerFrame
+    let existingPlacement = placementByWindow[window]
+    let placement =
+      existingPlacement
+      ?? WindowPlacementState(
+        originalOrigin: windowFrame.origin,
+        baselineWindowFrame: windowFrame,
+        baselineBannerFrame: bannerFrame
+      )
+
+    if existingPlacement == nil {
       debug(
         "Captured baseline window=\(NSStringFromRect(windowFrame)) banner=\(NSStringFromRect(bannerFrame))"
       )
@@ -375,8 +379,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     guard
       let target = targetOrigin(
-        for: baselineWindowFrame ?? windowFrame,
-        bannerFrame: baselineBannerFrame ?? bannerFrame
+        for: placement.baselineWindowFrame,
+        bannerFrame: placement.baselineBannerFrame
       )
     else {
       debug("Skipping window without containing screen for banner")
@@ -385,7 +389,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     let result = window.setPosition(target)
     let updatedFrame = window.frame()
-    windowIsShifted = result == .success
+    if result == .success {
+      placementByWindow[window] = placement
+    }
     debug(
       "Set window position result=\(result.name) target=\(NSStringFromPoint(target)) after=\(updatedFrame.map(NSStringFromRect) ?? "nil")"
     )
@@ -396,17 +402,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   }
 
   private func restoreWindowIfNeeded(_ window: AXUIElement, reason: String) {
-    guard windowIsShifted, let originalOrigin = originalWindowOrigin else { return }
-    let result = window.setPosition(originalOrigin)
+    guard let placement = placementByWindow[window] else { return }
+    let result = window.setPosition(placement.originalOrigin)
     let updatedFrame = window.frame()
     debug(
-      "Restored window position reason=\(reason) result=\(result.name) target=\(NSStringFromPoint(originalOrigin)) after=\(updatedFrame.map(NSStringFromRect) ?? "nil")"
+      "Restored window position reason=\(reason) result=\(result.name) target=\(NSStringFromPoint(placement.originalOrigin)) after=\(updatedFrame.map(NSStringFromRect) ?? "nil")"
     )
     if result == .success {
-      windowIsShifted = false
-      originalWindowOrigin = nil
-      baselineWindowFrame = nil
-      baselineBannerFrame = nil
+      placementByWindow.removeValue(forKey: window)
     }
   }
 
@@ -576,12 +579,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let titleSpacing: CGFloat = 6
 
     let contentStackHeight =
-      copyrightHeight + footerSpacing +
-      linkHeight + lineSpacing +
-      lineHeight + lineSpacing +
-      lineHeight + lineSpacing +
-      titleHeight + titleSpacing +
-      iconSize
+      copyrightHeight + footerSpacing + linkHeight + lineSpacing + lineHeight + lineSpacing
+      + lineHeight + lineSpacing + titleHeight + titleSpacing + iconSize
     let verticalPadding = max(12, floor((windowHeight - contentStackHeight) / 2))
 
     let copyrightY = verticalPadding
