@@ -43,6 +43,8 @@ private enum AppConstants {
 private enum DefaultsKey {
   static let menuBarIconHidden = "isMenuBarIconHidden"
   static let notificationPosition = "notificationPosition"
+  static let notificationDisplay = "notificationDisplay"
+  static let notificationDisplayName = "notificationDisplayName"
   static let debugLoggingEnabled = "debugLoggingEnabled"
 }
 
@@ -110,6 +112,32 @@ extension AXUIElement {
     let ordered = attribute(AppConstants.orderedChildrenAttribute, as: [AXUIElement].self) ?? []
     var seen = Set<AXUIElement>()
     return (direct + ordered).filter { seen.insert($0).inserted }
+  }
+}
+
+extension NSScreen {
+  fileprivate var displayUUID: String? {
+    guard
+      let number = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,
+      let uuid = CGDisplayCreateUUIDFromDisplayID(number)?.takeRetainedValue()
+    else {
+      return nil
+    }
+    return CFUUIDCreateString(nil, uuid) as String?
+  }
+
+  fileprivate static func menuTitles() -> [(uuid: String, title: String)] {
+    var totals = [String: Int]()
+    for screen in screens { totals[screen.localizedName, default: 0] += 1 }
+
+    var seen = [String: Int]()
+    return screens.compactMap { screen in
+      guard let uuid = screen.displayUUID else { return nil }
+      let name = screen.localizedName
+      guard totals[name, default: 0] > 1 else { return (uuid, name) }
+      seen[name, default: 0] += 1
+      return (uuid, "\(name) (\(seen[name, default: 0]))")
+    }
   }
 }
 
@@ -183,6 +211,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       .flatMap(NotificationPosition.init(rawValue:)) ?? .topMiddle
   }()
 
+  private var selectedDisplayUUID: String? = {
+    UserDefaults.standard.string(forKey: DefaultsKey.notificationDisplay)
+      .flatMap { $0.isEmpty ? nil : $0 }
+  }()
+
+  private var selectedDisplayName: String? = {
+    UserDefaults.standard.string(forKey: DefaultsKey.notificationDisplayName)
+  }()
+
   func launch() {
     prepareLogFile()
     info("Launch started")
@@ -192,6 +229,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     setupAXObserver()
     if !isIconHidden { setupStatusItem() }
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(screenParametersChanged),
+      name: NSApplication.didChangeScreenParametersNotification, object: nil)
+    moveAll()
+  }
+
+  @objc private func screenParametersChanged() {
+    info("Screen configuration changed, screens=\(NSScreen.screens.count)")
+    if statusItem != nil { statusItem?.menu = buildMenu() }
     moveAll()
   }
 
@@ -414,50 +460,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
   }
 
+  private var primaryMaxY: CGFloat {
+    NSScreen.screens.first?.frame.maxY ?? 0
+  }
+
+  private func cgFrame(of screen: NSScreen) -> CGRect {
+    CGRect(
+      x: screen.frame.minX, y: primaryMaxY - screen.frame.maxY,
+      width: screen.frame.width, height: screen.frame.height)
+  }
+
   private func containingScreen(for windowFrame: CGRect) -> NSScreen? {
-    let globalTopY = NSScreen.screens.map(\.frame.maxY).max() ?? 0
     let appKitPoint = CGPoint(
       x: windowFrame.midX,
-      y: globalTopY - (windowFrame.minY + windowFrame.height / 2)
+      y: primaryMaxY - (windowFrame.minY + windowFrame.height / 2)
     )
     return NSScreen.screens.first { $0.frame.contains(appKitPoint) }
   }
 
+  private func destinationScreen(for windowFrame: CGRect) -> NSScreen? {
+    if let selectedDisplayUUID {
+      if let screen = NSScreen.screens.first(where: { $0.displayUUID == selectedDisplayUUID }) {
+        return screen
+      }
+      debug("Selected display not connected uuid=\(selectedDisplayUUID)")
+    }
+    return containingScreen(for: windowFrame) ?? NSScreen.screens.first
+  }
+
   private func targetOrigin(for windowFrame: CGRect, bannerFrame: CGRect) -> CGPoint? {
-    guard let screen = containingScreen(for: windowFrame) else { return nil }
-    let screenFrame = screen.frame
-    let visibleFrame = screen.visibleFrame
+    guard let screen = destinationScreen(for: windowFrame) else { return nil }
+    let screenFrame = cgFrame(of: screen)
 
     let localBannerX = max(
       0, windowFrame.width - bannerFrame.width - AppConstants.bannerRightPadding)
     let rightPadding = max(0, windowFrame.width - (localBannerX + bannerFrame.width))
 
-    let x: CGFloat
+    let bannerX: CGFloat
     switch currentPosition {
     case .topLeft, .middleLeft, .bottomLeft:
-      x = rightPadding - localBannerX
+      bannerX = screenFrame.minX + rightPadding
     case .topMiddle, .deadCenter, .bottomMiddle:
-      x = screenFrame.minX + (screenFrame.width - bannerFrame.width) / 2 - localBannerX
+      bannerX = screenFrame.minX + (screenFrame.width - bannerFrame.width) / 2
     case .topRight, .middleRight, .bottomRight:
-      x = 0
+      bannerX = screenFrame.maxX - bannerFrame.width - rightPadding
     }
 
-    let dockSize = screenFrame.height - visibleFrame.height
-    let y: CGFloat
+    let dockSize = screen.frame.height - screen.visibleFrame.height
+    let bannerY: CGFloat
     switch currentPosition {
     case .topLeft, .topMiddle, .topRight:
-      y = 0
+      bannerY = screenFrame.minY
     case .middleLeft, .deadCenter, .middleRight:
-      y = (windowFrame.height - bannerFrame.height) / 2 - dockSize - AppConstants.dockPadding
+      bannerY =
+        screenFrame.minY + (screenFrame.height - bannerFrame.height) / 2 - dockSize
+        - AppConstants.dockPadding
     case .bottomLeft, .bottomMiddle, .bottomRight:
-      y = windowFrame.height - bannerFrame.height - dockSize - AppConstants.dockPadding
+      bannerY = screenFrame.maxY - bannerFrame.height - dockSize - AppConstants.dockPadding
     }
 
+    let target = CGPoint(x: bannerX - localBannerX, y: bannerY)
+
     debug(
-      "targetOrigin position=\(currentPosition.rawValue) window=\(NSStringFromRect(windowFrame)) banner=\(NSStringFromRect(bannerFrame)) screen=\(NSStringFromRect(screenFrame)) visible=\(NSStringFromRect(visibleFrame)) localBannerX=\(localBannerX) rightPadding=\(rightPadding) target=\(NSStringFromPoint(CGPoint(x: x, y: y)))"
+      "targetOrigin position=\(currentPosition.rawValue) display=\(screen.localizedName) window=\(NSStringFromRect(windowFrame)) banner=\(NSStringFromRect(bannerFrame)) screenCG=\(NSStringFromRect(screenFrame)) dock=\(dockSize) localBannerX=\(localBannerX) rightPadding=\(rightPadding) target=\(NSStringFromPoint(target))"
     )
 
-    return CGPoint(x: x, y: y)
+    return target
   }
 
   private func setupStatusItem() {
@@ -482,6 +550,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       menu.addItem(item)
     }
     menu.addItem(.separator())
+    let displayItem = NSMenuItem(title: "Display", action: nil, keyEquivalent: "")
+    displayItem.submenu = buildDisplayMenu()
+    menu.addItem(displayItem)
     let loginItem = NSMenuItem(
       title: "Launch at Login", action: #selector(toggleLoginItem(_:)), keyEquivalent: "")
     loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
@@ -506,6 +577,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     return menu
   }
 
+  private func buildDisplayMenu() -> NSMenu {
+    let menu = NSMenu()
+    let automatic = NSMenuItem(
+      title: "Automatic", action: #selector(selectDisplay(_:)), keyEquivalent: "")
+    automatic.representedObject = ""
+    automatic.state = selectedDisplayUUID == nil ? .on : .off
+    menu.addItem(automatic)
+    menu.addItem(.separator())
+
+    let displays = NSScreen.menuTitles()
+    for display in displays {
+      let item = NSMenuItem(
+        title: display.title, action: #selector(selectDisplay(_:)), keyEquivalent: "")
+      item.representedObject = display.uuid
+      item.state = display.uuid == selectedDisplayUUID ? .on : .off
+      menu.addItem(item)
+    }
+
+    if let selectedDisplayUUID, !displays.contains(where: { $0.uuid == selectedDisplayUUID }) {
+      let item = NSMenuItem(
+        title: "\(selectedDisplayName ?? "Selected Display") (Not Connected)",
+        action: #selector(selectDisplay(_:)), keyEquivalent: "")
+      item.representedObject = selectedDisplayUUID
+      item.state = .on
+      menu.addItem(item)
+    }
+
+    return menu
+  }
+
   @objc private func selectPosition(_ sender: NSMenuItem) {
     guard let pos = sender.representedObject as? NotificationPosition else { return }
     currentPosition = pos
@@ -513,6 +614,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     sender.menu?.items.forEach {
       $0.state = ($0.representedObject as? NotificationPosition) == pos ? .on : .off
     }
+    moveAll()
+  }
+
+  @objc private func selectDisplay(_ sender: NSMenuItem) {
+    guard let uuid = sender.representedObject as? String else { return }
+    let name = NSScreen.screens.first { $0.displayUUID == uuid }?.localizedName
+
+    selectedDisplayUUID = uuid.isEmpty ? nil : uuid
+    if uuid.isEmpty || name != nil { selectedDisplayName = name }
+
+    UserDefaults.standard.set(uuid, forKey: DefaultsKey.notificationDisplay)
+    UserDefaults.standard.set(selectedDisplayName, forKey: DefaultsKey.notificationDisplayName)
+
+    sender.menu?.items.forEach {
+      guard let itemUUID = $0.representedObject as? String else { return }
+      $0.state = itemUUID == uuid ? .on : .off
+    }
+    info("Display selection \(selectedDisplayName ?? "Automatic")")
     moveAll()
   }
 
