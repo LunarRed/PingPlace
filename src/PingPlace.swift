@@ -35,6 +35,7 @@ private enum AppConstants {
   static let bannerSubroles: Set<String> = [
     "AXNotificationCenterBanner", "AXNotificationCenterAlert",
     "AXNotificationCenterNotification", "AXNotificationCenterBannerWindow",
+    "AXNotificationCenterAlertStack",
   ]
   static let subsystem = "com.grimridge.PingPlace"
 }
