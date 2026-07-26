@@ -611,9 +611,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     guard let pos = sender.representedObject as? NotificationPosition else { return }
     currentPosition = pos
     UserDefaults.standard.set(pos.rawValue, forKey: DefaultsKey.notificationPosition)
-    sender.menu?.items.forEach {
-      guard let itemPosition = $0.representedObject as? NotificationPosition else { return }
-      $0.state = itemPosition == pos ? .on : .off
+    for item in sender.menu?.items ?? [] {
+      guard let itemPosition = item.representedObject as? NotificationPosition else { continue }
+      item.state = itemPosition == pos ? .on : .off
     }
     moveAll()
   }
