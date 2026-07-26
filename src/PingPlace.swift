@@ -510,7 +510,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     currentPosition = pos
     UserDefaults.standard.set(pos.rawValue, forKey: DefaultsKey.notificationPosition)
     sender.menu?.items.forEach {
-      $0.state = ($0.representedObject as? NotificationPosition) == pos ? .on : .off
+      guard let itemPosition = $0.representedObject as? NotificationPosition else { return }
+      $0.state = itemPosition == pos ? .on : .off
     }
     moveAll()
   }
