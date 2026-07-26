@@ -14,7 +14,9 @@ brew install notwadegrimridge/brew/pingplace
 
 ## Usage
 
-The app needs accessibility permissions to work. It lives in the menu bar. You can set notifications to appear in 8 positions, Top Middle being the default.
+The app needs accessibility permissions to work. It lives in the menu bar. You can set notifications to appear in 9 positions, Top Middle being the default.
+
+If you have more than one display, the Display menu picks which screen notifications appear on. Automatic, the default, leaves them on the display macOS chose; picking a display pins them there instead. Disconnecting the chosen display falls back to Automatic until it returns.
 
 ## Requirements
 
