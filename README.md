@@ -18,6 +18,8 @@ The app needs accessibility permissions to work. It lives in the menu bar. You c
 
 If you have more than one display, the Display menu picks which screen notifications appear on. Automatic, the default, leaves them on the display macOS chose; picking a display pins them there instead. Disconnecting the chosen display falls back to Automatic until it returns.
 
+Hide at Screen Edge parks notifications past the left or right edge of the screen with roughly 15% of each one still showing, so you can tell something arrived without reading it. Point at that sliver and the notification slides into view; move the pointer away and it slides back out. It only applies to the six left and right positions, so the menu item is greyed out on the middle three. If another display sits directly beyond the edge a notification is hiding past, it parks on that display instead of out of sight.
+
 ## Requirements
 
 - macOS 26.4.1 or later
