@@ -41,6 +41,7 @@ private enum AppConstants {
   static let orderedChildrenAttribute = "AXOrderedChildren"
   static let widgetEditorButtonIdentifier = "widget-editor-button"
   static let widgetIdentifierPrefix = "widget-local:"
+  static let notificationListIdentifier = "AXNotificationListItems"
   static let maxAccessibilityNodesPerWindow = 10_000
   static let maxBannerContentNodes = 400
   static let maxBannerStackHeightFraction: CGFloat = 0.75
@@ -165,7 +166,7 @@ extension NSScreen {
 private enum NotificationCenterWindowKind {
   case panel
   case desktopWidget
-  case banners([AXUIElement])
+  case banners([AXUIElement], isStackExpanded: Bool)
   case other
   case indeterminate
 }
@@ -194,6 +195,10 @@ private struct EdgeHidingState {
   let hiddenOrigin: CGPoint
   let revealedBannerFrame: CGRect
   let hiddenBannerFrame: CGRect
+  // An expanded stack's list reaches far to the left of its cards and catches clicks there, so
+  // parking one would leave an invisible strip on screen that neither passes clicks through nor
+  // brings the stack back. Expanding is also a sign the stack is in use, so it stays revealed.
+  let isStackExpanded: Bool
   var isRevealed: Bool
 
   var origin: CGPoint {
@@ -404,6 +409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var visited = Set<AXUIElement>()
     var containsDesktopWidget = false
     var banners = [AXUIElement]()
+    var isStackExpanded = false
 
     while let element = pending.popLast() {
       guard visited.insert(element).inserted else { continue }
@@ -418,6 +424,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if identifier.hasPrefix(AppConstants.widgetIdentifierPrefix) {
           containsDesktopWidget = true
         }
+        // An expanded stack puts a heading for its app, with Show Less and Clear beside it,
+        // straight into the notification list. A collapsed list never contains one.
+        if identifier == AppConstants.notificationListIdentifier,
+          element.children().contains(where: {
+            $0.attribute(kAXRoleAttribute, as: String.self) == "AXHeading"
+          })
+        {
+          isStackExpanded = true
+        }
       }
 
       if let subrole = element.attribute(kAXSubroleAttribute, as: String.self),
@@ -430,7 +445,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     if containsDesktopWidget { return .desktopWidget }
-    if !banners.isEmpty { return .banners(banners) }
+    if !banners.isEmpty { return .banners(banners, isStackExpanded: isStackExpanded) }
     return .other
   }
 
@@ -465,6 +480,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
   private func move(_ window: AXUIElement) {
     let banners: [AXUIElement]
+    let isStackExpanded: Bool
     switch classify(window) {
     case .panel:
       restoreWindowIfNeeded(window, reason: "Notification Center panel opened")
@@ -473,8 +489,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     case .desktopWidget:
       debug("Skipping desktop widget window")
       return
-    case .banners(let elements):
+    case .banners(let elements, let expanded):
       banners = elements
+      isStackExpanded = expanded
     case .other:
       restoreWindowIfNeeded(window, reason: "No banner visible")
       debug("Skipping window without banner")
@@ -563,7 +580,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hiddenOrigin: CGPoint(x: revealedOrigin.x + offset, y: revealedOrigin.y),
         revealedBannerFrame: revealedBannerFrame,
         hiddenBannerFrame: revealedBannerFrame.offsetBy(dx: offset, dy: 0),
-        isRevealed: existingPlacement?.edgeHiding?.isRevealed ?? false
+        isStackExpanded: isStackExpanded,
+        isRevealed: isStackExpanded || (existingPlacement?.edgeHiding?.isRevealed ?? false)
       )
     }
 
@@ -725,16 +743,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   private func updateEdgeHoverState() {
     // Watching the banners should catch a stack changing shape, but the pointer is the one thing
     // guaranteed to be moving when the zones matter, so use it to bound how stale they can get.
+    // Expanding a stack can arrive without an event we observe, so check again before hiding a
+    // banner the pointer has just left, or a freshly expanded stack would be parked anyway.
+    let pointer = pointerLocationInScreenSpace
+    let isAboutToHide = placementByWindow.values.contains {
+      guard let edgeHiding = $0.edgeHiding else { return false }
+      return edgeHiding.isRevealed && !edgeHiding.isStackExpanded
+        && !edgeHiding.hoverZone.contains(pointer)
+    }
     if !placementByWindow.isEmpty,
-      CACurrentMediaTime() - lastPlacementRefresh >= AppConstants.placementRefreshInterval
+      isAboutToHide
+        || CACurrentMediaTime() - lastPlacementRefresh >= AppConstants.placementRefreshInterval
     {
       refreshPlacements()
     }
 
-    let pointer = pointerLocationInScreenSpace
     for (window, placement) in placementByWindow {
       guard let edgeHiding = placement.edgeHiding else { continue }
-      let shouldReveal = edgeHiding.hoverZone.contains(pointer)
+      let shouldReveal = edgeHiding.isStackExpanded || edgeHiding.hoverZone.contains(pointer)
       guard shouldReveal != edgeHiding.isRevealed else { continue }
 
       placementByWindow[window]?.edgeHiding?.isRevealed = shouldReveal
